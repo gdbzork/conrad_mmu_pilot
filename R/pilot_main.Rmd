@@ -1,0 +1,37 @@
+---
+title: "Conrad Mouse Embryo RNA-seq Pilot"
+author: "Melanie Conrad and Gord Brown"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r base_configuration}
+library(knitr)
+library(XLConnect)
+source('pilot_utils.R')
+opts_knit$set(root.dir="/data/brown22/conrad")
+sampleSheetFN <- '/data/brown22/conrad/sampleSheet.xlsx'
+sampleSheet <- readWorksheetFromFile(sampleSheetFN,sheet=1)
+```
+
+```{r logging_configuration}
+library(logging)
+logFile <- "/data/brown22/conrad/pilot_log.txt"
+pilot_log <- getLogger("pilot")
+pilot_log$addHandler(writeToFile,file=logFile,level="DEBUG")
+pilot_log$setLevel("DEBUG")
+```
+
+Count reads in BAM files:
+```{r count_fastq_reads,cache=TRUE}
+fq_read_count <- reads_in_fastq(sampleSheet$FastqRead1)
+```
+
+Count reads in BAM files:
+```{r count_bam_reads,cache=TRUE}
+#aln_read_count <- reads_in_bam(sampleSheet$Bam)
+```
+
+```{r base_final}
+sessionInfo()
+```
