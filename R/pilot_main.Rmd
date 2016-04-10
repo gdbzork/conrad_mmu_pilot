@@ -8,28 +8,72 @@ output: html_document
 ```{r base_configuration}
 library(knitr)
 library(XLConnect)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(Rsamtools)
+library(GenomicAlignments)
+library(GenomicRanges)
+library(BiocParallel)
+library(DESeq2)
+library(S4Vectors)
+library(pheatmap)
+library(RColorBrewer)
 source('pilot_utils.R')
-opts_knit$set(root.dir="/data/brown22/conrad")
-sampleSheetFN <- '/data/brown22/conrad/sampleSheet.xlsx'
+root <- "/data/brown22/analyses/conrad"
+opts_knit$set(root.dir=root)
+sampleSheetFN <- sprintf("%s/sampleSheet.xlsx",root)
 sampleSheet <- readWorksheetFromFile(sampleSheetFN,sheet=1)
+sampleSheet$Treatment = relevel(as.factor(sampleSheet$Treatment),"control")
+sampleSheet$Age = as.factor(sampleSheet$Age)
+sampleSheet$Sex = as.factor(sampleSheet$Sex)
 ```
 
 ```{r logging_configuration}
 library(logging)
-logFile <- "/data/brown22/conrad/pilot_log.txt"
+logFile <- sprintf("%s/pilot_log.txt",root)
 pilot_log <- getLogger("pilot")
 pilot_log$addHandler(writeToFile,file=logFile,level="DEBUG")
 pilot_log$setLevel("DEBUG")
 ```
 
-Count reads in BAM files:
+Count reads in Fastq files:
 ```{r count_fastq_reads,cache=TRUE}
 fq_read_count <- reads_in_fastq(sampleSheet$FastqRead1)
 ```
 
 Count reads in BAM files:
 ```{r count_bam_reads,cache=TRUE}
-#aln_read_count <- reads_in_bam(sampleSheet$Bam)
+aln_read_count <- reads_in_bam(sampleSheet$Bam)
+```
+
+Make a gene model and count the reads:
+```{r gene_model,cache=TRUE}
+register(MulticoreParam(workers=8))
+txdb <- exonsBy(TxDb.Mmusculus.UCSC.mm10.knownGene,by="gene")
+files <- BamFileList(sampleSheet$Bam,yieldSize=10000000)
+counts <- summarizeOverlaps(features=txdb,reads=files,
+                            mode="Union",
+                            singleEnd=FALSE,
+                            ignore.strand=TRUE,
+                            fragments=TRUE)
+colData(counts) <- DataFrame(sampleSheet)
+```
+
+```{r make_DESeq}
+ex <- DESeqDataSet(counts, design = ~ Age + Sex + Treatment)
+ex <- ex[rowSums(counts(ex)) > 1, ]
+rex <- rlog(ex,blind=FALSE)
+```
+
+```{r distances}
+sdist <- dist(t(assay(rex)))
+smat <- as.matrix(sdist)
+rownames(smat) <- paste(rex$Treatment,rex$Age,rex$Sex, sep="_")
+colnames(smat) <- NULL
+colours <- colorRampPalette(rev(brewer.pal(9,"Blues")))(255)
+pheatmap(smat,clustering_distance_rows=sdist,clustering_distance_cols=sdist,col=colours)
+pdf("mouse_initial_clustering_heatmap.pdf")
+pheatmap(smat,clustering_distance_rows=sdist,clustering_distance_cols=sdist,col=colours)
+dev.off()
 ```
 
 ```{r base_final}
