@@ -23,3 +23,27 @@ reads_in_bam <- function(fns) {
   pilot_log$info("wd: %s",getwd())
   return(as.numeric(sapply(fns,reads_in_single_bam)))
 }
+
+plot_heatmap <- function(data) {
+  sample_dist <- dist(t(assay(data)))
+  sample_mat <- as.matrix(sample_dist)
+  rownames(sample_mat) <- paste(data$SampleID,
+                                data$Treatment,
+                                data$Age,
+                                data$Sex,
+                                sep="_")
+  colnames(sample_mat) <- NULL
+  colours <- colorRampPalette(rev(brewer.pal(9,"Blues")))(255)
+  pheatmap(sample_mat,
+           clustering_distance_rows=sample_dist,
+           clustering_distance_cols=sample_dist,
+           col=colours)
+}
+
+de_analysis <- function(data,model,subset_vec,alpha=0.05) {
+  de_obj <- DESeqDataSet(data,design = model)
+  de_obj <- subset(de_obj,select=subset_vec)
+  de_diff <- DESeq(de_obj)
+  de_results <- results(de_diff,alpha=0.05)
+  return(de_results)
+}

@@ -5,6 +5,13 @@ date: "`r Sys.Date()`"
 output: html_document
 ---
 
+This is a "knitr" script, which intersperses written text with R code, plots,
+and so on.  The text outside of boxes is written by me.  The text in blue-grey
+boxes is R code that's doing the analysis.  The text in white boxes is output
+from R commands.  Mostly it can be ignored... it's the plots and the comments
+from me that will be useful.
+
+
 ```{r base_configuration}
 library(knitr)
 library(XLConnect)
@@ -17,6 +24,7 @@ library(DESeq2)
 library(S4Vectors)
 library(pheatmap)
 library(RColorBrewer)
+library(org.Mm.eg.db)
 source('pilot_utils.R')
 root <- "/data/brown22/analyses/conrad"
 opts_knit$set(root.dir=root)
@@ -58,23 +66,140 @@ counts <- summarizeOverlaps(features=txdb,reads=files,
 colData(counts) <- DataFrame(sampleSheet)
 ```
 
-```{r make_DESeq}
+```{r make_DESeq,cache=TRUE}
+counts <- counts[rowSums(assay(counts)) > 1,]
 ex <- DESeqDataSet(counts, design = ~ Age + Sex + Treatment)
-ex <- ex[rowSums(counts(ex)) > 1, ]
 rex <- rlog(ex,blind=FALSE)
 ```
 
-```{r distances}
-sdist <- dist(t(assay(rex)))
-smat <- as.matrix(sdist)
-rownames(smat) <- paste(rex$Treatment,rex$Age,rex$Sex, sep="_")
-colnames(smat) <- NULL
-colours <- colorRampPalette(rev(brewer.pal(9,"Blues")))(255)
-pheatmap(smat,clustering_distance_rows=sdist,clustering_distance_cols=sdist,col=colours)
-pdf("mouse_initial_clustering_heatmap.pdf")
-pheatmap(smat,clustering_distance_rows=sdist,clustering_distance_cols=sdist,col=colours)
-dev.off()
+You can see from the following clustering (based on read counts, without
+any normalizing) that one sample, E1709-6-1A (treated,female,E13.5) is very
+unlike the others.  Do you know if there was anything strange about that
+sample?  I'll try removing it from the analysis.
+
+The following principal components analysis plot (another form of clustering)
+shows the same outlier in the lower left.  This is a very abstract sort of
+clustering that finds (this probably won't make sense) a function that
+accounts for as much variability as possible, then subtracts it (that's the
+horizontal position), then a second function that accounts for as much of
+the remaining variability as possible (vertical) and so on.  What you're
+looking for is to be able to draw a horizontal or vertical line between groups,
+color them according to some attribute(s) of interest, and see if the colors
+match the clusters.  In this case, age is overwhelmingly significant, with
+treatment/control showing separation at E13.5 but not E17.5.
+
+```{r distances,cache=TRUE}
+plot_heatmap(rex)
+plotPCA(rex,intgroup=c('Age','Treatment'))
 ```
+
+Let's re-plot without the outlier:
+
+```{r without_outlier,cache=TRUE}
+ex_no_E1709 <- subset(ex,select=(SampleID!='E1709-6-1A'))
+rex_no_E1709 <- rlog(ex_no_E1709,blind=FALSE)
+plot_heatmap(rex_no_E1709)
+plotPCA(rex_no_E1709,intgroup=c('Age','Treatment'))
+```
+
+I'm not sure why I said in my previous email that clustering by sex
+looked reasonable.  It doesn't in the following clustering:
+
+```{r clustering_by_sex,cache=TRUE}
+plotPCA(rex_no_E1709,intgroup=c('Sex'))
+```
+
+For the moment I'll carry on without factoring in sex.
+(Story of my life... :( )
+Let's try a differential analysis on treatment, conditioning on age.
+
+```{r analysis_age_treat,cache=TRUE,results='hold',message=FALSE,warning=FALSE}
+ex_results <- de_analysis(counts,
+                          ~Age+Treatment,
+                          counts$SampleID != 'E1709-6-1A')
+summary(ex_results)
+```
+
+So the above tells us that there are around 200 genes up-regulated in treatment
+w.r.t. control, and around 975 down-regulated.  So that's promising.  Just 
+as a quick peek, here's a plot of the normalized counts for the most DE
+gene:
+
+```{r most_de_gene}
+tg = rownames(ex_results)[which.min(ex_results$padj)]
+plotCounts(ex_diff,gene=tg,intgroup=c('Treatment'))
+print(tg)
+```
+
+which happens to be a
+"Slc13a3 solute carrier family 13 (sodium-dependent dicarboxylate transporter), member 3".  No idea if that's interesting... but it clearly shows a distinct difference between the treatment and control.  I didn't colour it for age, but 
+clearly the lower groups are E13.5 and the upper E17.5, just based on counts.
+
+Let's make one quick check.  Considering age groups separately, are there
+sex-specific differences?
+```{r sex_specifc,cache=TRUE,results='hold',message=FALSE,warning=FALSE}
+ex_sex_13.5 <- de_analysis(counts,~ Treatment + Sex,counts$Age=='E13.5')
+ex_sex_17.5 <- de_analysis(counts,~ Treatment + Sex,counts$Age=='E17.5')
+summary(ex_sex_13.5)
+summary(ex_sex_17.5)
+```
+So that tells us that at E13.5 there are no statistically significant
+differences by sex, but by E17.5 there are a few (around 150).  For now,
+I'll proceed without considering sex as a factor.  (I can generate gene
+lists for the E17.5 set if you like.)
+
+Here are differential analyses for E13.5, E17.5:
+```{r de_by_age,cache=TRUE,results='hold',message=FALSE,warning=FALSE}
+ex_age_13.5 <- de_analysis(counts,
+                           ~ Treatment,
+                           counts$Age=='E13.5'&counts$SampleID!='E1709-6-1A')
+ex_age_17.5 <- de_analysis(counts,
+                           ~ Treatment,
+                           counts$Age=='E17.5'&counts$SampleID!='E1709-6-1A')
+summary(ex_age_13.5)
+summary(ex_age_17.5)
+```
+
+So that tells us that there are clear differences at E13.5, but none by
+E17.5 (not too surprising considering the clustering).
+
+On to get some gene lists.
+
+```{r gene_lists,cache=TRUE}
+genes_down_E13.5 <- ex_age_13.5[!is.na(ex_age_13.5$padj)&ex_age_13.5$padj<0.05&ex_age_13.5$log2FoldChange>0,]
+genes_up_E13.5 <- ex_age_13.5[!is.na(ex_age_13.5$padj)&ex_age_13.5$padj<0.05&ex_age_13.5$log2FoldChange<0,]
+entrezID_down_E13.5 <- rownames(genes_down_E13.5)
+entrezID_up_E13.5 <- rownames(genes_up_E13.5)
+results_down_E13.5 <- data.frame(entrezID=entrezID_down_E13.5,
+                                 symbol=mapIds(org.Mm.eg.db,keys=entrezID_down_E13.5,column='SYMBOL',keytype='ENTREZID',multiVals='first'),
+                                 name=mapIds(org.Mm.eg.db,keys=entrezID_down_E13.5,column='GENENAME',keytype='ENTREZID',multiVals='first'),
+                                 ensembl=mapIds(org.Mm.eg.db,keys=entrezID_down_E13.5,column='ENSEMBL',keytype='ENTREZID',multiVals='first'),
+                                 refseq=mapIds(org.Mm.eg.db,keys=entrezID_down_E13.5,column='REFSEQ',keytype='ENTREZID',multiVals='first'),
+                                 logFC=genes_down_E13.5$log2FoldChange,
+                                 pvalue_adj=genes_down_E13.5$padj)
+results_up_E13.5 <- data.frame(entrezID=entrezID_up_E13.5,
+                                 symbol=mapIds(org.Mm.eg.db,keys=entrezID_up_E13.5,column='SYMBOL',keytype='ENTREZID',multiVals='first'),
+                                 name=mapIds(org.Mm.eg.db,keys=entrezID_up_E13.5,column='GENENAME',keytype='ENTREZID',multiVals='first'),
+                                 ensembl=mapIds(org.Mm.eg.db,keys=entrezID_up_E13.5,column='ENSEMBL',keytype='ENTREZID',multiVals='first'),
+                                 refseq=mapIds(org.Mm.eg.db,keys=entrezID_up_E13.5,column='REFSEQ',keytype='ENTREZID',multiVals='first'),
+                                 logFC=genes_up_E13.5$log2FoldChange,
+                                 pvalue_adj=genes_up_E13.5$padj)
+write.table(results_down_E13.5,file="genes_down_E13.5.txt",row.names=FALSE,col.names=TRUE,quote=FALSE,sep='\t')
+write.table(results_up_E13.5,file="genes_up_E13.5.txt",row.names=FALSE,col.names=TRUE,quote=FALSE,sep='\t')
+```
+
+Note that the comparison was "control vs bacteria", so a negative fold
+change actually means "higher in bacteria", and likewise a positive
+fold change means "down in bacteria".  Here are links to the tab-separated
+text files for up- and down-regulated genes.  The columns are Entrez ID,
+gene symbol, name, ensembl ID, Refseq ID, log fold change, and adjusted
+p-value (corrected for multiple hypothesis testing).
+
+<a href="genes_down_E13.5.txt">Down-regulated</a>
+
+<a href="genes_up_E13.5.txt">Up-regulated</a>
+
+Gene ontology, pathway analysis, variability and power calculations coming soon...
 
 ```{r base_final}
 sessionInfo()
