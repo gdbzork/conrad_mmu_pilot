@@ -12,10 +12,11 @@ from R commands.  Mostly it can be ignored... it's the plots and the comments
 from me that will be useful.
 
 
-```{r base_configuration}
+```{r base_configuration,echo=FALSE,collapse=TRUE}
 library(knitr)
 library(XLConnect)
 library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(limma)
 library(Rsamtools)
 library(GenomicAlignments)
 library(GenomicRanges)
@@ -33,9 +34,11 @@ sampleSheet <- readWorksheetFromFile(sampleSheetFN,sheet=1)
 sampleSheet$Treatment = relevel(as.factor(sampleSheet$Treatment),"control")
 sampleSheet$Age = as.factor(sampleSheet$Age)
 sampleSheet$Sex = as.factor(sampleSheet$Sex)
+register(MulticoreParam(workers=12))
+
 ```
 
-```{r logging_configuration}
+```{r logging_configuration,echo=FALSE,collapse=TRUE}
 library(logging)
 logFile <- sprintf("%s/pilot_log.txt",root)
 pilot_log <- getLogger("pilot")
@@ -43,19 +46,22 @@ pilot_log$addHandler(writeToFile,file=logFile,level="DEBUG")
 pilot_log$setLevel("DEBUG")
 ```
 
-Count reads in Fastq files:
-```{r count_fastq_reads,cache=TRUE}
-fq_read_count <- reads_in_fastq(sampleSheet$FastqRead1)
+Some preparation steps:
+* count reads in Fastq files
+* count reads in BAM files
+* count reads in genes
+
+```{r count_fastq_reads,cache=TRUE,echo=FALSE,collapse=TRUE}
+fq_read_count <- pairs_in_fastq(sampleSheet$FastqRead1)
 ```
 
-Count reads in BAM files:
-```{r count_bam_reads,cache=TRUE}
+```{r count_bam_reads,cache=TRUE,echo=FALSE,collapse=TRUE,warning=FALSE}
 aln_read_count <- reads_in_bam(sampleSheet$Bam)
+raw_data <- data.frame(fq_read_count,fq_read_count*2,aln_read_count)
+colnames(raw_data) <- c("Fragments","Reads","Aligned","Properly Paired")
 ```
 
-Make a gene model and count the reads:
-```{r gene_model,cache=TRUE}
-register(MulticoreParam(workers=8))
+```{r gene_model,cache=TRUE,echo=FALSE,collapse=TRUE}
 txdb <- exonsBy(TxDb.Mmusculus.UCSC.mm10.knownGene,by="gene")
 files <- BamFileList(sampleSheet$Bam,yieldSize=10000000)
 counts <- summarizeOverlaps(features=txdb,reads=files,
@@ -66,19 +72,33 @@ counts <- summarizeOverlaps(features=txdb,reads=files,
 colData(counts) <- DataFrame(sampleSheet)
 ```
 
-```{r make_DESeq,cache=TRUE}
+After these counting steps, we show the total number of reads, aligned reads,
+and so on for each sample.  Note that the number of reads is just double the
+number of fragments, since these are paired-end lanes.
+```{r show_samples,dependson=c("count_fastq_reads","count_bam_reads","gene_model"),echo=FALSE,collapse=TRUE}
+readsInPeaks <- apply(assay(counts),2,sum)
+fracInPeaks <- readsInPeaks / raw_data$Aligned
+samples <- data.frame(sampleSheet$SampleID,sampleSheet$Treatment,sampleSheet$Age,sampleSheet$Sex,raw_data,readsInPeaks,format(readsInPeaks/raw_data$Aligned*100,digits=3))
+
+colnames(samples) <- c("Sample","Treatment","Age","Sex","Fragments","Reads",
+                       "Aligned","Properly Paired","In Genes","% In Genes")
+options(width=130)
+print(samples)
+```
+
+```{r make_DESeq,cache=TRUE,dependson="gene_model",echo=FALSE,collapse=TRUE}
 counts <- counts[rowSums(assay(counts)) > 1,]
 ex <- DESeqDataSet(counts, design = ~ Age + Sex + Treatment)
 rex <- rlog(ex,blind=FALSE)
 ```
 
-You can see from the following clustering (based on read counts, without
+You can see from the following heat map and principal components analysis
+plots (based on read counts, without
 any normalizing) that one sample, E1709-6-1A (treated,female,E13.5) is very
 unlike the others.  Do you know if there was anything strange about that
-sample?  I'll try removing it from the analysis.
+sample?
 
-The following principal components analysis plot (another form of clustering)
-shows the same outlier in the lower left.  This is a very abstract sort of
+PCA is a very abstract sort of
 clustering that finds (this probably won't make sense) a function that
 accounts for as much variability as possible, then subtracts it (that's the
 horizontal position), then a second function that accounts for as much of
@@ -88,74 +108,56 @@ color them according to some attribute(s) of interest, and see if the colors
 match the clusters.  In this case, age is overwhelmingly significant, with
 treatment/control showing separation at E13.5 but not E17.5.
 
-```{r distances,cache=TRUE}
+```{r distances,cache=TRUE,dependson="make_DESeq",echo=FALSE,collapse=TRUE}
 plot_heatmap(rex)
 plotPCA(rex,intgroup=c('Age','Treatment'))
 ```
 
-Let's re-plot without the outlier:
-
-```{r without_outlier,cache=TRUE}
-ex_no_E1709 <- subset(ex,select=(SampleID!='E1709-6-1A'))
-rex_no_E1709 <- rlog(ex_no_E1709,blind=FALSE)
-plot_heatmap(rex_no_E1709)
-plotPCA(rex_no_E1709,intgroup=c('Age','Treatment'))
+Let's just ditch that outlier and try again.
+```{r ditch_outlier,cache=TRUE,dependson="gene_model",echo=FALSE,collapse=TRUE}
+counts <- counts[,counts$SampleID!='E1709-6-1A']
+sampleSheet <- sampleSheet[sampleSheet$SampleID!='E1709-6-1A',]
 ```
 
-I'm not sure why I said in my previous email that clustering by sex
-looked reasonable.  It doesn't in the following clustering:
-
-```{r clustering_by_sex,cache=TRUE}
-plotPCA(rex_no_E1709,intgroup=c('Sex'))
+```{r without_outlier,cache=TRUE,dependson="ditch_outlier",echo=FALSE,collapse=TRUE}
+ex <- DESeqDataSet(counts, design = ~ Age + Sex + Treatment)
+rex <- rlog(ex,blind=FALSE)
+plot_heatmap(rex)
+plotPCA(rex,intgroup=c('Age','Treatment'))
 ```
 
+That looks better.
+
+Looking for sex effects, we can draw the same PCA plot but colour it by
+sex:
+
+```{r clustering_by_sex,cache=TRUE,dependson="without_outlier",echo=FALSE,collapse=TRUE}
+plotPCA(rex,intgroup=c('Sex'))
+```
+
+Doesn't look like sex is a strong influence.
 For the moment I'll carry on without factoring in sex.
 (Story of my life... :( )
+
 Let's try a differential analysis on treatment, conditioning on age.
 
-```{r analysis_age_treat,cache=TRUE,results='hold',message=FALSE,warning=FALSE}
+```{r analysis_age_treat,cache=TRUE,results='hold',dependson="without_outlier",message=FALSE,warning=FALSE,echo=FALSE,collapse=TRUE}
 ex_results <- de_analysis(counts,
                           ~Age+Treatment,
-                          counts$SampleID != 'E1709-6-1A')
+                          alpha=0.05,
+                          contrast=c("Treatment","bacteria","control"))
 summary(ex_results)
 ```
 
-So the above tells us that there are around 200 genes up-regulated in treatment
-w.r.t. control, and around 975 down-regulated.  So that's promising.  Just 
-as a quick peek, here's a plot of the normalized counts for the most DE
-gene:
+So the above tells us that there are around 975 genes up-regulated in treatment
+w.r.t. control, and around 240 down-regulated.  So that's promising.
 
-```{r most_de_gene}
-tg = rownames(ex_results)[which.min(ex_results$padj)]
-plotCounts(ex_diff,gene=tg,intgroup=c('Treatment'))
-print(tg)
-```
 
-which happens to be a
-"Slc13a3 solute carrier family 13 (sodium-dependent dicarboxylate transporter), member 3".  No idea if that's interesting... but it clearly shows a distinct difference between the treatment and control.  I didn't colour it for age, but 
-clearly the lower groups are E13.5 and the upper E17.5, just based on counts.
-
-Let's make one quick check.  Considering age groups separately, are there
-sex-specific differences?
-```{r sex_specifc,cache=TRUE,results='hold',message=FALSE,warning=FALSE}
-ex_sex_13.5 <- de_analysis(counts,~ Treatment + Sex,counts$Age=='E13.5')
-ex_sex_17.5 <- de_analysis(counts,~ Treatment + Sex,counts$Age=='E17.5')
-summary(ex_sex_13.5)
-summary(ex_sex_17.5)
-```
-So that tells us that at E13.5 there are no statistically significant
-differences by sex, but by E17.5 there are a few (around 150).  For now,
-I'll proceed without considering sex as a factor.  (I can generate gene
-lists for the E17.5 set if you like.)
-
-Here are differential analyses for E13.5, E17.5:
-```{r de_by_age,cache=TRUE,results='hold',message=FALSE,warning=FALSE}
-ex_age_13.5 <- de_analysis(counts,
-                           ~ Treatment,
-                           counts$Age=='E13.5'&counts$SampleID!='E1709-6-1A')
-ex_age_17.5 <- de_analysis(counts,
-                           ~ Treatment,
-                           counts$Age=='E17.5'&counts$SampleID!='E1709-6-1A')
+Here are differential analyses for E13.5, E17.5 separately (i.e. instead of
+conditioning on age):
+```{r de_by_age,cache=TRUE,results='hold',dependson="ditch_outlier",message=FALSE,warning=FALSE,echo=FALSE,collapse=TRUE}
+ex_age_13.5 <- de_analysis(counts, ~ Treatment, counts$Age=='E13.5')
+ex_age_17.5 <- de_analysis(counts, ~ Treatment, counts$Age=='E17.5')
 summary(ex_age_13.5)
 summary(ex_age_17.5)
 ```
@@ -163,44 +165,62 @@ summary(ex_age_17.5)
 So that tells us that there are clear differences at E13.5, but none by
 E17.5 (not too surprising considering the clustering).
 
-On to get some gene lists.
+So basically we have two approaches: look for treatment versus control,
+conditioning on age, or discard the E17.5's and look at E13.5.  I'll build
+gene lists for both, then intersect them to get a (presumably) higher-quality
+set of genes.
 
-```{r gene_lists,cache=TRUE}
-genes_down_E13.5 <- ex_age_13.5[!is.na(ex_age_13.5$padj)&ex_age_13.5$padj<0.05&ex_age_13.5$log2FoldChange>0,]
-genes_up_E13.5 <- ex_age_13.5[!is.na(ex_age_13.5$padj)&ex_age_13.5$padj<0.05&ex_age_13.5$log2FoldChange<0,]
-entrezID_down_E13.5 <- rownames(genes_down_E13.5)
-entrezID_up_E13.5 <- rownames(genes_up_E13.5)
-results_down_E13.5 <- data.frame(entrezID=entrezID_down_E13.5,
-                                 symbol=mapIds(org.Mm.eg.db,keys=entrezID_down_E13.5,column='SYMBOL',keytype='ENTREZID',multiVals='first'),
-                                 name=mapIds(org.Mm.eg.db,keys=entrezID_down_E13.5,column='GENENAME',keytype='ENTREZID',multiVals='first'),
-                                 ensembl=mapIds(org.Mm.eg.db,keys=entrezID_down_E13.5,column='ENSEMBL',keytype='ENTREZID',multiVals='first'),
-                                 refseq=mapIds(org.Mm.eg.db,keys=entrezID_down_E13.5,column='REFSEQ',keytype='ENTREZID',multiVals='first'),
-                                 logFC=genes_down_E13.5$log2FoldChange,
-                                 pvalue_adj=genes_down_E13.5$padj)
-results_up_E13.5 <- data.frame(entrezID=entrezID_up_E13.5,
-                                 symbol=mapIds(org.Mm.eg.db,keys=entrezID_up_E13.5,column='SYMBOL',keytype='ENTREZID',multiVals='first'),
-                                 name=mapIds(org.Mm.eg.db,keys=entrezID_up_E13.5,column='GENENAME',keytype='ENTREZID',multiVals='first'),
-                                 ensembl=mapIds(org.Mm.eg.db,keys=entrezID_up_E13.5,column='ENSEMBL',keytype='ENTREZID',multiVals='first'),
-                                 refseq=mapIds(org.Mm.eg.db,keys=entrezID_up_E13.5,column='REFSEQ',keytype='ENTREZID',multiVals='first'),
-                                 logFC=genes_up_E13.5$log2FoldChange,
-                                 pvalue_adj=genes_up_E13.5$padj)
-write.table(results_down_E13.5,file="genes_down_E13.5.txt",row.names=FALSE,col.names=TRUE,quote=FALSE,sep='\t')
-write.table(results_up_E13.5,file="genes_up_E13.5.txt",row.names=FALSE,col.names=TRUE,quote=FALSE,sep='\t')
+```{r gene_lists,cache=TRUE,dependson="de_by_age",echo=FALSE,collapse=TRUE}
+genes_down_all <- ex_results[!is.na(ex_results$padj)&ex_results$padj<0.05&ex_results$log2FoldChange<0,]
+genes_up_all <- ex_results[!is.na(ex_results$padj)&ex_results$padj<0.05&ex_results$log2FoldChange>0,]
+genes_down_E13.5 <- ex_age_13.5[!is.na(ex_age_13.5$padj)&ex_age_13.5$padj<0.05&ex_age_13.5$log2FoldChange<0,]
+genes_up_E13.5 <- ex_age_13.5[!is.na(ex_age_13.5$padj)&ex_age_13.5$padj<0.05&ex_age_13.5$log2FoldChange>0,]
+
+df_down_E13.5 <- mkDataFrame(genes_down_E13.5,"genes_down_E13.5.txt")
+df_up_E13.5 <- mkDataFrame(genes_up_E13.5,"genes_up_E13.5.txt")
+df_down_all <- mkDataFrame(genes_down_all,"genes_down_all.txt")
+df_up_all <- mkDataFrame(genes_up_all,"genes_up_all.txt")
 ```
 
-Note that the comparison was "control vs bacteria", so a negative fold
-change actually means "higher in bacteria", and likewise a positive
-fold change means "down in bacteria".  Here are links to the tab-separated
-text files for up- and down-regulated genes.  The columns are Entrez ID,
-gene symbol, name, ensembl ID, Refseq ID, log fold change, and adjusted
-p-value (corrected for multiple hypothesis testing).
+Here are links to the tab-separated text files for up- and down-regulated
+genes.  The columns are Entrez ID, gene symbol, name, ensembl ID, Refseq ID,
+log fold change, and adjusted p-value (corrected for multiple hypothesis
+testing).
 
-<a href="genes_down_E13.5.txt">Down-regulated</a>
+<a href="genes_down_all.txt">Down-regulated (all)</a>
 
-<a href="genes_up_E13.5.txt">Up-regulated</a>
+<a href="genes_up_all.txt">Up-regulated (all)</a>
+
+<a href="genes_down_E13.5.txt">Down-regulated (E13.5)</a>
+
+<a href="genes_up_E13.5.txt">Up-regulated (E13.5)</a>
+
+Some comparisons between the sets:
+```{r overlap_tests,cache=TRUE,dependson="gene_lists",echo=FALSE,collapse=TRUE}
+venn2(rownames(genes_down_all),rownames(genes_down_E13.5),"All","E13.5","Down-regulated: All vs E13.5")
+venn2(rownames(genes_up_all),rownames(genes_up_E13.5),"All","E13.5","Up-regulated: All vs E13.5")
+```
+
+And the intersections of the gene lists.
+```{r intersections,cache=TRUE,dependson="gene_lists",echo=FALSE,collapse=TRUE}
+entrez_down_intersect = intersect(rownames(genes_down_all),rownames(genes_down_E13.5))
+entrez_up_intersect = intersect(rownames(genes_up_all),rownames(genes_up_E13.5))
+genes_down_intersect = genes_down_all[entrez_down_intersect,]
+genes_up_intersect = genes_up_all[entrez_up_intersect,]
+df_down_intersect = mkDataFrame(genes_down_intersect,"genes_down_intersect.txt")
+df_up_intersect = mkDataFrame(genes_up_intersect,"genes_up_intersect.txt")
+df_ud_intersect = rbind(df_down_intersect,df_up_intersect)
+write.table(df_ud_intersect,file="genes_up+down_intersect.txt",row.names=FALSE,col.names=TRUE,quote=FALSE,sep='\t')
+```
+<a href="genes_down_intersect.txt">Down-regulated (intersection)</a>
+
+<a href="genes_up_intersect.txt">Up-regulated (intersection)</a>
+
+<a href="genes_up+down_intersect.txt">Up- or Down-regulated (intersection)</a> (just the merge of the two preceding files)
 
 Gene ontology, pathway analysis, variability and power calculations coming soon...
 
-```{r base_final}
+```{r base_final,echo=FALSE,collapse=TRUE}
+options(width=80)
 sessionInfo()
 ```
