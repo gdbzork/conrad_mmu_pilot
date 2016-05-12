@@ -27,14 +27,14 @@ library(pheatmap)
 library(RColorBrewer)
 library(org.Mm.eg.db)
 source('pilot_utils.R')
-root <- "/data/brown22/analyses/conrad"
+root <- "/Users/brown22/Desktop/Conrad"
 opts_knit$set(root.dir=root)
 sampleSheetFN <- sprintf("%s/sampleSheet.xlsx",root)
 sampleSheet <- readWorksheetFromFile(sampleSheetFN,sheet=1)
 sampleSheet$Treatment = relevel(as.factor(sampleSheet$Treatment),"control")
 sampleSheet$Age = as.factor(sampleSheet$Age)
 sampleSheet$Sex = as.factor(sampleSheet$Sex)
-register(MulticoreParam(workers=12))
+register(MulticoreParam(workers=2))
 
 ```
 

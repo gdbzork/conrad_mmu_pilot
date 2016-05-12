@@ -1,0 +1,170 @@
+---
+title: "Conrad Mouse Embryo RNA-seq Power Calculations"
+author: "Melanie Conrad and Gord Brown"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r base_configuration,echo=FALSE,collapse=TRUE}
+library(knitr)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(GenomicRanges)
+library(org.Mm.eg.db)
+library(ggplot2)
+library(RNASeqPower)
+root <- "/Users/brown22/Desktop/Conrad"
+opts_knit$set(root.dir=root)
+dataFN = sprintf("%s/counts_raw.RData",root)
+load(dataFN)
+```
+
+```{r normalize_counts,echo=FALSE}
+data <- as.data.frame(assay(counts))
+sampleSheet <- colData(counts)
+tags <- sapply(strsplit(sampleSheet$SampleID,"-"),function(x) x[1])
+colnames(data) <- paste(tags,sampleSheet$Treatment,sampleSheet$Age,sep="_")
+sampleSums <- colSums(data)
+meanSums <- mean(sampleSums)
+normFactors <- meanSums / sampleSums
+mdata <- sweep(data,2,normFactors,`*`)
+normSums <- colSums(mdata)
+rm(data,normFactors)
+```
+
+Load counts, normalize to mean of total counts.  The plot shows that the
+read counts after normalization all sum to the same value
+(`r round(normSums[1]/10^6,1)`M reads).
+
+```{r plotNormalized,echo=FALSE}
+udf <- data.frame(tag=tags,count='raw',size=sampleSums)
+ndf <- data.frame(tag=tags,count='norm',size=normSums)
+adf <- rbind(udf,ndf)
+p = ggplot(adf,aes(tag,size,colour=count,fill=count)) +
+           geom_bar(stat='identity',position='dodge')
+print(p)
+rm(sampleSums,meanSums,normSums,udf,ndf,adf,p,tags)
+```
+
+Define groups:
+
+```{r define_groups,echo=FALSE}
+masks <- list(
+          con_13.5=(sampleSheet$Age=='E13.5'&sampleSheet$Treatment=='control'),
+          bac_13.5=(sampleSheet$Age=='E13.5'&sampleSheet$Treatment=='bacteria'),
+          con_17.5=(sampleSheet$Age=='E17.5'&sampleSheet$Treatment=='control'),
+          bac_17.5=(sampleSheet$Age=='E17.5'&sampleSheet$Treatment=='bacteria'))
+print(masks)
+```
+
+Calculate coefficient of variation, and print a histogram showing its values
+across genes (by sample group), and the median per sample group:
+
+```{r calc_coefficient,echo=FALSE,cache=TRUE}
+calcCov <- function(mask,df) {
+  sdf <- df[,mask]
+  m <- apply(sdf,1,mean)
+  sd <- apply(sdf,1,sd)
+  return(sd/m)
+}
+coeffVar <- as.data.frame(lapply(masks,calcCov,mdata))
+```
+
+```{r display_coeff,echo=FALSE,collapse=TRUE,warning=FALSE,message=FALSE}
+s = stack(coeffVar)
+print(ggplot(s,aes(values,colour=ind)) + geom_histogram(position='dodge'))
+meds <- apply(coeffVar,2,median,na.rm=TRUE)
+print("Medians:")
+print(meds)
+rm(s,meds)
+```
+
+```{r get_top_N,echo=FALSE}
+topn <- 5000
+mdata_sums <- rowSums(mdata)
+mdata_srt <- rev(mdata_sums[order(mdata_sums)])
+top_mdata <- mdata[names(mdata_srt)[1:topn],]
+coeffVar_top <- as.data.frame(lapply(masks,calcCov,top_mdata))
+rm(mdata_sums,mdata_srt)
+```
+
+Let's try the same thing with the top `r topn` expressed genes, to see if the
+results are more consistent.
+
+```{r plot_top_N,echo=FALSE,collapse=TRUE,warning=FALSE,message=FALSE}
+s = stack(coeffVar_top)
+print(ggplot(s,aes(values,colour=ind)) + geom_histogram(position='dodge'))
+meds_top <- apply(coeffVar_top,2,median,na.rm=TRUE)
+print("Medians:")
+print(meds_top)
+rm(s,meds_top)
+```
+
+Now, at last, some power calculations.  We need expected depth of coverage
+per sample, coefficient of variation of the groups, effect size we're after,
+false positive rate alpha, power.  We can do this two ways:
+ - get the median or mean coefficient of variation for all genes, then
+   estimate power based on that, or
+ - calculate power for each gene (with various effect sizes and power levels),
+   and get the median or mean sample size needed from that.
+We'll try a variety of parameters:
+
+```{r define_methods,echo=FALSE}
+power_by_sample <- function(data,cv,tag1,tag2,effect=1.5,alpha=0.05,power=0.9) {
+  expected <- min(apply(data[,(masks[[tag1]]|masks[[tag2]])],2,median))
+  sizes <- mapply(rnapower,cv=cv[,tag1],cv2=cv[,tag2],
+                   MoreArgs=list(depth=expected,
+                                 effect=effect,
+                                 alpha=alpha,
+                                 power=power),
+                   USE.NAMES=TRUE)
+  res = median(sizes,na.rm=TRUE)
+  print(sprintf("bySample: %s vs %s: effect=%.2f, alpha=%.2f, power=%.2f: median n=%.2f",
+                tag1,tag2,effect,alpha,power,res))
+  invisible(res)
+}
+
+power_by_median <- function(data,cv,tag1,tag2,effect=1.5,alpha=0.05,power=0.9) {
+  expected <- min(apply(data[,masks[[tag1]]|masks[[tag2]]],2,median)) 
+  cv1 <- median(cv[[tag1]],na.rm=TRUE)
+  cv2 <- median(cv[[tag2]],na.rm=TRUE)
+  res = rnapower(depth=expected,cv=cv1,cv2=cv2,
+                 effect=effect,alpha=alpha,power=power)
+  print(sprintf("byMedian: %s vs %s: effect=%.2f, alpha=%.2f, power=%.2f: median n=%.2f",
+                tag1,tag2,effect,alpha,power,res))
+  invisible(res)
+}
+  
+power_by_mean <- function(data,cv,tag1,tag2,effect=1.5,alpha=0.05,power=0.9) {
+  expected <- min(apply(data[,masks[[tag1]]|masks[[tag2]]],2,median)) 
+  cv1 <- mean(cv[[tag1]],na.rm=TRUE)
+  cv2 <- mean(cv[[tag2]],na.rm=TRUE)
+  res = rnapower(depth=expected,cv=cv1,cv2=cv2,
+                 effect=effect,alpha=alpha,power=power)
+  print(sprintf("byMean: %s vs %s: effect=%.2f, alpha=%.2f, power=%.2f: median n=%.2f",
+                tag1,tag2,effect,alpha,power,res))
+  invisible(res)
+}
+```
+
+```{r calc_power,echo=FALSE,collapse=TRUE}
+power_by_sample(mdata,coeffVar_top,"con_13.5","bac_13.5",effect=1.25)
+power_by_sample(mdata,coeffVar_top,"con_13.5","bac_13.5",effect=1.5)
+power_by_sample(mdata,coeffVar_top,"con_13.5","bac_13.5",effect=1.75)
+power_by_median(mdata,coeffVar_top,"con_13.5","bac_13.5",effect=1.25)
+power_by_median(mdata,coeffVar_top,"con_13.5","bac_13.5",effect=1.5)
+power_by_median(mdata,coeffVar_top,"con_13.5","bac_13.5",effect=1.75)
+power_by_mean(mdata,coeffVar_top,"con_13.5","bac_13.5",effect=1.25)
+power_by_mean(mdata,coeffVar_top,"con_13.5","bac_13.5",effect=1.5)
+power_by_mean(mdata,coeffVar_top,"con_13.5","bac_13.5",effect=1.75)
+```
+
+So these various results suggest that to capture an effect size of 1.25-fold
+change, you should aim for 6-7 mice per group.  That's ignoring sex differences;
+ideally, if possible, since sex isn't actually what you're studying, you could
+try for 6-7 of the same sex.  7 is probably better, allowing for 1 or 2
+bad samples (as we saw with this first batch).
+
+```{r base_final,echo=FALSE,collapse=TRUE}
+options(width=80)
+sessionInfo()
+```

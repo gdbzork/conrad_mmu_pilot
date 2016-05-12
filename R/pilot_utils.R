@@ -1,6 +1,6 @@
 pairs_in_single_fastq <- function(fn) {
   pilot_log$info("Counting fastq reads in %s...",fn)
-  cmd <- sprintf("zcat %s | wc -l",fn)
+  cmd <- sprintf("gunzip -c %s | wc -l",fn)
   s <- system(cmd,intern=TRUE)
   pairs <- as.numeric(s) / 4 # because 4 lines per Fastq read
   return(pairs)
