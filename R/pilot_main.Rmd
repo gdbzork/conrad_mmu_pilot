@@ -27,7 +27,7 @@ library(pheatmap)
 library(RColorBrewer)
 library(org.Mm.eg.db)
 source('pilot_utils.R')
-root <- "/Users/brown22/Desktop/Conrad"
+root <- "/data/brown22/analyses/conrad"
 opts_knit$set(root.dir=root)
 sampleSheetFN <- sprintf("%s/sampleSheet.xlsx",root)
 sampleSheet <- readWorksheetFromFile(sampleSheetFN,sheet=1)
