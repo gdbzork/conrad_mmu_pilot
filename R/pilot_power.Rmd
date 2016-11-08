@@ -12,6 +12,7 @@ library(GenomicRanges)
 library(org.Mm.eg.db)
 library(ggplot2)
 library(RNASeqPower)
+library(SummarizedExperiment)
 root <- "/Users/brown22/Desktop/Conrad"
 opts_knit$set(root.dir=root)
 dataFN = sprintf("%s/counts_raw.RData",root)
